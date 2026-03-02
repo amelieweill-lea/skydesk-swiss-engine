@@ -206,5 +206,6 @@ def positions_range(
         "count": len(data),
         "zodiac": zodiac,
         "siderealMode": sid_mode if zodiac == "sidereal" else None,
-        "data": data,
+        "days": data,
     }
+
