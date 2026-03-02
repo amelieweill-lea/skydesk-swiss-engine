@@ -22,13 +22,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------
-# Conventions
-# -----------------------------
-# Tropical = défaut Swiss Ephemeris
-# Géocentrique
-# UT via calc_ut
-
 PLANETS = [
     ("sun", swe.SUN),
     ("moon", swe.MOON),
@@ -53,18 +46,11 @@ ZodiacMode = Literal["tropical", "sidereal"]
 SidMode = Literal["lahiri", "fagan_bradley"]
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def sign_from_lon(lon: float) -> Dict[str, Any]:
     lon = lon % 360.0
     sign_index = int(lon // 30)
     deg_in_sign = lon - 30 * sign_index
-    return {
-        "sign": SIGNS[sign_index],
-        "signIndex": sign_index,
-        "degreeInSign": deg_in_sign,
-    }
+    return {"sign": SIGNS[sign_index], "signIndex": sign_index, "degreeInSign": deg_in_sign}
 
 
 def parse_date_yyyy_mm_dd(s: str) -> dt.date:
@@ -92,31 +78,36 @@ def calc_body(jd: float, body_id: int, zodiac: ZodiacMode, sid_mode: SidMode) ->
     xx, _ = swe.calc_ut(jd, body_id, flags)
     lon, lat, dist, speed_lon, speed_lat, speed_dist = xx
 
-    result = {
+    out = {
         "longitude": lon % 360.0,
         "latitude": lat,
         "distance": dist,
         "longitudeSpeed": speed_lon,
         "isRetrograde": speed_lon < 0,
     }
+    out.update(sign_from_lon(lon))
+    return out
 
-    result.update(sign_from_lon(lon))
-    return result
 
-
-def add_south_node(container: Dict[str, Any]) -> None:
-    nn = container["true_node"]["longitude"]
+def add_south_node(bodies: Dict[str, Any]) -> None:
+    nn = bodies["true_node"]["longitude"]
     south_lon = (nn + 180.0) % 360.0
-    container["south_node"] = {
+    bodies["south_node"] = {
         **sign_from_lon(south_lon),
         "longitude": south_lon,
         "derivedFrom": "true_node+180",
     }
 
 
-# -----------------------------
-# Endpoints
-# -----------------------------
+def bodies_to_positions_list(bodies: Dict[str, Any]) -> List[Dict[str, Any]]:
+    # Rend "positions" itérable pour le frontend
+    out: List[Dict[str, Any]] = []
+    for key, val in bodies.items():
+        item = {"key": key}
+        item.update(val)
+        out.append(item)
+    return out
+
 
 @app.get("/api/health")
 def health(
@@ -127,19 +118,12 @@ def health(
         d = dt.date(2026, 1, 1)
         jd = jd_at_00utc(d)
         sun = calc_body(jd, swe.SUN, zodiac, sid_mode)
-
         return {
             "status": "ok",
             "engine": "swisseph-python",
             "zodiac": zodiac,
             "siderealMode": sid_mode if zodiac == "sidereal" else None,
-            "sample": {
-                "sun": {
-                    "longitude": sun["longitude"],
-                    "sign": sun["sign"],
-                    "speed": sun["longitudeSpeed"],
-                }
-            },
+            "sample": {"sun": {"longitude": sun["longitude"], "sign": sun["sign"]}},
         }
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -154,11 +138,12 @@ def positions(
     d = parse_date_yyyy_mm_dd(date)
     jd = jd_at_00utc(d)
 
-    bodies = {}
+    bodies: Dict[str, Any] = {}
     for name, body_id in PLANETS:
         bodies[name] = calc_body(jd, body_id, zodiac, sid_mode)
-
     add_south_node(bodies)
+
+    positions_list = bodies_to_positions_list(bodies)
 
     return {
         "status": "ok",
@@ -166,8 +151,9 @@ def positions(
         "jd": jd,
         "zodiac": zodiac,
         "siderealMode": sid_mode if zodiac == "sidereal" else None,
-        "bodies": bodies,
-        "positions": bodies,  # compat frontend
+        "bodies": bodies,                 # format objet
+        "positionsMap": bodies,           # alias objet (compat)
+        "positions": positions_list,      # format liste (itérable)
     }
 
 
@@ -180,7 +166,6 @@ def positions_range(
 ):
     d0 = parse_date_yyyy_mm_dd(start)
     d1 = parse_date_yyyy_mm_dd(end)
-
     if d1 < d0:
         return {"status": "error", "detail": "end must be >= start"}
 
@@ -191,25 +176,25 @@ def positions_range(
         d = d0 + dt.timedelta(days=i)
         jd = jd_at_00utc(d)
 
-        bodies = {}
+        bodies: Dict[str, Any] = {}
         for name, body_id in PLANETS:
             bodies[name] = calc_body(jd, body_id, zodiac, sid_mode)
-
         add_south_node(bodies)
 
-        day_entry = {
+        positions_list = bodies_to_positions_list(bodies)
+
+        days.append({
             "date": d.isoformat(),
             "jd": jd,
             "bodies": bodies,
-            "positions": bodies,  # compat frontend
-        }
-
-        days.append(day_entry)
+            "positionsMap": bodies,
+            "positions": positions_list,   # itérable
+        })
 
     return {
         "status": "ok",
         "start": d0.isoformat(),
         "end": d1.isoformat(),
         "count": len(days),
-        "days": days,  # frontend attend "days"
+        "days": days,  # le frontend attend "days"
     }
