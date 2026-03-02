@@ -2,7 +2,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 import swisseph as swe
 import datetime as dt
-from typing import Dict, List, Any, Optional, Literal
+from typing import Dict, List, Any, Literal
 
 app = FastAPI()
 
@@ -25,6 +25,7 @@ app.add_middleware(
 # --- Conventions: géocentrique, UT ---
 # Tropical = par défaut dans Swiss Ephemeris.
 # Pas de set_topo => géocentrique.
+# UT via calc_ut
 
 PLANETS = [
     ("sun", swe.SUN),
@@ -41,10 +42,13 @@ PLANETS = [
     ("mean_apog", swe.MEAN_APOG),  # Lilith “moyenne”
 ]
 
-SIGNS = ["Aries","Taurus","Gemini","Cancer","Leo","Virgo","Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"]
+SIGNS = [
+    "Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",
+    "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces",
+]
 
 ZodiacMode = Literal["tropical", "sidereal"]
-SidMode = Literal["fagan_bradley"]  # extensible plus tard
+SidMode = Literal["lahiri", "fagan_bradley"]
 
 
 def sign_from_lon(lon: float) -> Dict[str, Any]:
@@ -68,24 +72,25 @@ def jd_at_00utc(d: dt.date) -> float:
 
 
 def sid_mode_to_swe(mode: SidMode) -> int:
-    # On peut ajouter d’autres modes ici plus tard
+    if mode == "lahiri":
+        return swe.SIDM_LAHIRI
     if mode == "fagan_bradley":
         return swe.SIDM_FAGAN_BRADLEY
-    return swe.SIDM_FAGAN_BRADLEY
+    # fallback safe
+    return swe.SIDM_LAHIRI
 
 
 def calc_body(
     jd: float,
     body_id: int,
     zodiac: ZodiacMode = "tropical",
-    sid_mode: SidMode = "fagan_bradley",
+    sid_mode: SidMode = "lahiri",
 ) -> Dict[str, Any]:
     """
     Calcule une position à jd (UT), en tropical ou sidéral.
 
-    Important:
     - Tropical: flags = 0 (défaut).
-    - Sidéral: on met le mode sidéral + le flag SEFLG_SIDEREAL.
+    - Sidéral: on set le mode sidéral + FLG_SIDEREAL.
     """
     flags = 0
 
@@ -110,9 +115,10 @@ def calc_body(
 def add_south_node(bodies: Dict[str, Any]) -> None:
     # Nœud Sud = Nœud Nord + 180°
     nn = bodies["true_node"]["longitude"]
+    south_lon = (nn + 180.0) % 360.0
     bodies["south_node"] = {
-        **sign_from_lon((nn + 180.0) % 360.0),
-        "longitude": (nn + 180.0) % 360.0,
+        **sign_from_lon(south_lon),
+        "longitude": south_lon,
         "derivedFrom": "true_node+180",
     }
 
@@ -120,5 +126,85 @@ def add_south_node(bodies: Dict[str, Any]) -> None:
 @app.get("/api/health")
 def health(
     zodiac: ZodiacMode = Query("tropical", description="tropical | sidereal"),
-    sid_mode: SidMode = Query("lahiri", description="sidereal mode (lahiri or fagan_bradley)")
+    sid_mode: SidMode = Query("lahiri", description="sidereal mode (lahiri | fagan_bradley)"),
+):
+    try:
+        d = dt.date(2026, 1, 1)
+        jd = jd_at_00utc(d)
+        sun = calc_body(jd, swe.SUN, zodiac=zodiac, sid_mode=sid_mode)
 
+        return {
+            "status": "ok",
+            "engine": "swisseph-python",
+            "zodiac": zodiac,
+            "siderealMode": sid_mode if zodiac == "sidereal" else None,
+            "testDateUTC": "2026-01-01T00:00:00Z",
+            "sample": {
+                "sun": {"lon": sun["longitude"], "speed": sun["longitudeSpeed"], "sign": sun["sign"]}
+            },
+        }
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+@app.get("/api/positions")
+def positions(
+    date: str = Query(..., description="YYYY-MM-DD (UTC, 00:00)"),
+    zodiac: ZodiacMode = Query("tropical", description="tropical | sidereal"),
+    sid_mode: SidMode = Query("lahiri", description="sidereal mode (lahiri | fagan_bradley)"),
+):
+    d = parse_date_yyyy_mm_dd(date)
+    jd = jd_at_00utc(d)
+
+    out = {
+        "status": "ok",
+        "date": d.isoformat(),
+        "jd": jd,
+        "zodiac": zodiac,
+        "siderealMode": sid_mode if zodiac == "sidereal" else None,
+        "bodies": {},
+    }
+
+    for name, body_id in PLANETS:
+        out["bodies"][name] = calc_body(jd, body_id, zodiac=zodiac, sid_mode=sid_mode)
+
+    add_south_node(out["bodies"])
+    return out
+
+
+@app.get("/api/positions/range")
+def positions_range(
+    start: str = Query(..., description="YYYY-MM-DD"),
+    end: str = Query(..., description="YYYY-MM-DD"),
+    zodiac: ZodiacMode = Query("tropical", description="tropical | sidereal"),
+    sid_mode: SidMode = Query("lahiri", description="sidereal mode (lahiri | fagan_bradley)"),
+):
+    d0 = parse_date_yyyy_mm_dd(start)
+    d1 = parse_date_yyyy_mm_dd(end)
+    if d1 < d0:
+        return {"status": "error", "detail": "end must be >= start"}
+
+    days = (d1 - d0).days + 1
+    data: List[Dict[str, Any]] = []
+
+    for i in range(days):
+        d = d0 + dt.timedelta(days=i)
+        jd = jd_at_00utc(d)
+        row = {"date": d.isoformat(), "jd": jd, "bodies": {}}
+
+        for name, body_id in PLANETS:
+            row["bodies"][name] = calc_body(jd, body_id, zodiac=zodiac, sid_mode=sid_mode)
+
+        add_south_node(row["bodies"])
+        data.append(row)
+
+    return {
+        "status": "ok",
+        "start": d0.isoformat(),
+        "end": d1.isoformat(),
+        "step": "1d@00:00Z",
+        "count": len(data),
+        "zodiac": zodiac,
+        "siderealMode": sid_mode if zodiac == "sidereal" else None,
+        "data": data,
+    }
