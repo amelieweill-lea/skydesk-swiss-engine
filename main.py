@@ -2,23 +2,29 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 import swisseph as swe
 import datetime as dt
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Literal
 
 app = FastAPI()
 
-# CORS: autorise ton front publié
+# --- CORS ---
+# Lovable peut servir depuis différents sous-domaines (preview, etc.)
+# + support local dev
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://starry-path-2026.lovable.app"],
-    allow_credentials=False,
+    allow_origins=[
+        "https://starry-path-2026.lovable.app",
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ],
+    allow_origin_regex=r"https://.*\.lovable\.app",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Conventions: tropical, géocentrique, UT ---
-# Swiss Ephemeris est tropical par défaut; on force quand même le mode au démarrage.
-swe.set_sid_mode(swe.SIDM_FAGAN_BRADLEY, 0, 0)  # sans effet en tropical; safe
-# Pas de set_topo -> géocentrique
+# --- Conventions: géocentrique, UT ---
+# Tropical = par défaut dans Swiss Ephemeris.
+# Pas de set_topo => géocentrique.
 
 PLANETS = [
     ("sun", swe.SUN),
@@ -37,6 +43,10 @@ PLANETS = [
 
 SIGNS = ["Aries","Taurus","Gemini","Cancer","Leo","Virgo","Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"]
 
+ZodiacMode = Literal["tropical", "sidereal"]
+SidMode = Literal["fagan_bradley"]  # extensible plus tard
+
+
 def sign_from_lon(lon: float) -> Dict[str, Any]:
     lon = lon % 360.0
     sign_index = int(lon // 30)
@@ -47,18 +57,45 @@ def sign_from_lon(lon: float) -> Dict[str, Any]:
         "degreeInSign": deg_in_sign,
     }
 
+
 def parse_date_yyyy_mm_dd(s: str) -> dt.date:
-    # attend "YYYY-MM-DD"
     return dt.datetime.strptime(s, "%Y-%m-%d").date()
+
 
 def jd_at_00utc(d: dt.date) -> float:
     # 00:00 UTC
     return swe.julday(d.year, d.month, d.day, 0.0)
 
-def calc_body(jd: float, body_id: int) -> Dict[str, Any]:
-    # calc_ut renvoie (xx, retflag) où xx = [lon, lat, dist, speed_lon, speed_lat, speed_dist]
-    xx, _ = swe.calc_ut(jd, body_id)
+
+def sid_mode_to_swe(mode: SidMode) -> int:
+    # On peut ajouter d’autres modes ici plus tard
+    if mode == "fagan_bradley":
+        return swe.SIDM_FAGAN_BRADLEY
+    return swe.SIDM_FAGAN_BRADLEY
+
+
+def calc_body(
+    jd: float,
+    body_id: int,
+    zodiac: ZodiacMode = "tropical",
+    sid_mode: SidMode = "fagan_bradley",
+) -> Dict[str, Any]:
+    """
+    Calcule une position à jd (UT), en tropical ou sidéral.
+
+    Important:
+    - Tropical: flags = 0 (défaut).
+    - Sidéral: on met le mode sidéral + le flag SEFLG_SIDEREAL.
+    """
+    flags = 0
+
+    if zodiac == "sidereal":
+        swe.set_sid_mode(sid_mode_to_swe(sid_mode), 0, 0)
+        flags |= swe.FLG_SIDEREAL
+
+    xx, _ = swe.calc_ut(jd, body_id, flags)
     lon, lat, dist, speed_lon, speed_lat, speed_dist = xx
+
     s = sign_from_lon(lon)
     return {
         "longitude": lon % 360.0,
@@ -69,85 +106,18 @@ def calc_body(jd: float, body_id: int) -> Dict[str, Any]:
         **s,
     }
 
-@app.get("/api/health")
-def health():
-    try:
-        d = dt.date(2026, 1, 1)
-        jd = jd_at_00utc(d)
-        sun = calc_body(jd, swe.SUN)
-        moon = calc_body(jd, swe.MOON)
-        merc = calc_body(jd, swe.MERCURY)
-        return {
-            "status": "ok",
-            "engine": "swisseph-python",
-            "testDateUTC": "2026-01-01T00:00:00Z",
-            "sample": {
-                "sun": {"lon": sun["longitude"], "speed": sun["longitudeSpeed"], "sign": sun["sign"]},
-                "moon": {"lon": moon["longitude"], "speed": moon["longitudeSpeed"], "sign": moon["sign"]},
-                "mercury": {"lon": merc["longitude"], "speed": merc["longitudeSpeed"], "sign": merc["sign"]},
-            }
-        }
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
 
-@app.get("/api/positions")
-def positions(date: str = Query(..., description="YYYY-MM-DD (UTC, 00:00)")):
-    """
-    Positions à 00:00 UTC pour une date donnée.
-    """
-    d = parse_date_yyyy_mm_dd(date)
-    jd = jd_at_00utc(d)
-
-    out = {"date": d.isoformat(), "jd": jd, "bodies": {}}
-    for name, body_id in PLANETS:
-        out["bodies"][name] = calc_body(jd, body_id)
-
+def add_south_node(bodies: Dict[str, Any]) -> None:
     # Nœud Sud = Nœud Nord + 180°
-    nn = out["bodies"]["true_node"]["longitude"]
-    out["bodies"]["south_node"] = {
+    nn = bodies["true_node"]["longitude"]
+    bodies["south_node"] = {
         **sign_from_lon((nn + 180.0) % 360.0),
         "longitude": (nn + 180.0) % 360.0,
         "derivedFrom": "true_node+180",
     }
-    return out
 
-@app.get("/api/positions/range")
-def positions_range(
-    start: str = Query(..., description="YYYY-MM-DD"),
-    end: str = Query(..., description="YYYY-MM-DD"),
-):
-    """
-    Positions quotidiennes à 00:00 UTC, start..end inclus.
-    Aucune interpolation.
-    """
-    d0 = parse_date_yyyy_mm_dd(start)
-    d1 = parse_date_yyyy_mm_dd(end)
-    if d1 < d0:
-        return {"status": "error", "detail": "end must be >= start"}
 
-    days = (d1 - d0).days + 1
-    data: List[Dict[str, Any]] = []
-
-    for i in range(days):
-        d = d0 + dt.timedelta(days=i)
-        jd = jd_at_00utc(d)
-        row = {"date": d.isoformat(), "jd": jd, "bodies": {}}
-        for name, body_id in PLANETS:
-            row["bodies"][name] = calc_body(jd, body_id)
-
-        nn = row["bodies"]["true_node"]["longitude"]
-        row["bodies"]["south_node"] = {
-            **sign_from_lon((nn + 180.0) % 360.0),
-            "longitude": (nn + 180.0) % 360.0,
-            "derivedFrom": "true_node+180",
-        }
-        data.append(row)
-
-    return {
-        "status": "ok",
-        "start": d0.isoformat(),
-        "end": d1.isoformat(),
-        "step": "1d@00:00Z",
-        "count": len(data),
-        "data": data,
-    }
+@app.get("/api/health")
+def health(
+    zodiac: ZodiacMode = Query("tropical", description="tropical | sidereal"),
+    sid_mode: SidMode = Query("fagan_bradley", description="sidereal mode (if zodiac
