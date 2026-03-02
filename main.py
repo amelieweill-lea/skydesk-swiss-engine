@@ -21,7 +21,7 @@ def health():
         dt = datetime.datetime(2026, 1, 1, 0, 0)
         jd = swe.julday(dt.year, dt.month, dt.day, 0.0)
 
-        lon, lat, dist, speed_lon = swe.calc_ut(jd, swe.SUN)[0]
+        lon, lat, dist, speed_lon, speed_lat, speed_dist = swe.calc_ut(jd, swe.SUN)[0]
 
         return {
             "status": "ok",
@@ -32,3 +32,4 @@ def health():
 
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
