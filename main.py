@@ -100,7 +100,7 @@ def add_south_node(bodies: Dict[str, Any]) -> None:
 
 
 def bodies_to_positions_list(bodies: Dict[str, Any]) -> List[Dict[str, Any]]:
-    # Rend "positions" itérable pour le frontend
+    # Liste itérable avec la clé "key" (sun, moon, etc.)
     out: List[Dict[str, Any]] = []
     for key, val in bodies.items():
         item = {"key": key}
@@ -151,9 +151,9 @@ def positions(
         "jd": jd,
         "zodiac": zodiac,
         "siderealMode": sid_mode if zodiac == "sidereal" else None,
-        "bodies": bodies,                 # format objet
-        "positionsMap": bodies,           # alias objet (compat)
-        "positions": positions_list,      # format liste (itérable)
+        "bodies": bodies,
+        "positions": bodies,                 # accès direct positions.sun ✅
+        "positionsList": positions_list,     # itérable ✅
     }
 
 
@@ -187,8 +187,8 @@ def positions_range(
             "date": d.isoformat(),
             "jd": jd,
             "bodies": bodies,
-            "positionsMap": bodies,
-            "positions": positions_list,   # itérable
+            "positions": bodies,               # accès direct ✅
+            "positionsList": positions_list,   # itérable ✅
         })
 
     return {
@@ -196,7 +196,7 @@ def positions_range(
         "start": d0.isoformat(),
         "end": d1.isoformat(),
         "count": len(days),
-        "days": days,  # le frontend attend "days"
+        "days": days,
     }
 
 
@@ -205,11 +205,9 @@ def positions_range(
 # -----------------------------
 @app.get("/api/events")
 def events(
-    start: str | None = Query(None, description="YYYY-MM-DD (optional)"),
-    end: str | None = Query(None, description="YYYY-MM-DD (optional)"),
+    start: str = Query(None, description="YYYY-MM-DD (optional)"),
+    end: str = Query(None, description="YYYY-MM-DD (optional)"),
 ):
-    # Endpoint de compat : le frontend tente de charger des "events".
-    # Pour l’instant, on renvoie une liste vide (pas d’événements calculés).
     return {
         "status": "ok",
         "start": start,
@@ -224,7 +222,6 @@ def events_range(
     start: str = Query(..., description="YYYY-MM-DD"),
     end: str = Query(..., description="YYYY-MM-DD"),
 ):
-    # Compat si le frontend appelle /api/events/range
     return {
         "status": "ok",
         "start": start,
