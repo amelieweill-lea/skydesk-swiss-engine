@@ -198,3 +198,38 @@ def positions_range(
         "count": len(days),
         "days": days,  # le frontend attend "days"
     }
+
+
+# -----------------------------
+# Compat endpoints for Lovable frontend
+# -----------------------------
+@app.get("/api/events")
+def events(
+    start: str | None = Query(None, description="YYYY-MM-DD (optional)"),
+    end: str | None = Query(None, description="YYYY-MM-DD (optional)"),
+):
+    # Endpoint de compat : le frontend tente de charger des "events".
+    # Pour l’instant, on renvoie une liste vide (pas d’événements calculés).
+    return {
+        "status": "ok",
+        "start": start,
+        "end": end,
+        "count": 0,
+        "events": [],
+    }
+
+
+@app.get("/api/events/range")
+def events_range(
+    start: str = Query(..., description="YYYY-MM-DD"),
+    end: str = Query(..., description="YYYY-MM-DD"),
+):
+    # Compat si le frontend appelle /api/events/range
+    return {
+        "status": "ok",
+        "start": start,
+        "end": end,
+        "count": 0,
+        "events": [],
+        "days": [],
+    }
