@@ -120,4 +120,5 @@ def add_south_node(bodies: Dict[str, Any]) -> None:
 @app.get("/api/health")
 def health(
     zodiac: ZodiacMode = Query("tropical", description="tropical | sidereal"),
-    sid_mode: SidMode = Query("fagan_bradley", description="sidereal mode (if zodiac
+    sid_mode: SidMode = Query("lahiri", description="sidereal mode (lahiri or fagan_bradley)")
+
