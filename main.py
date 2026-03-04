@@ -1,10 +1,39 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import swisseph as swe
 import datetime as dt
 from typing import Dict, List, Any, Literal
+from pathlib import Path
+import os
 
 app = FastAPI()
+
+# -----------------------------
+# Paths / Swiss Ephemeris files
+# -----------------------------
+BASE_DIR = Path(__file__).resolve().parent
+# EPHE_PATH can be overridden on Render with an env var, but defaults to ./ephe next to main.py
+EPHE_PATH = Path(os.getenv("EPHE_PATH", str(BASE_DIR / "ephe")))
+
+REQUIRED_EPHE_FILES = ["sepl_18.se1", "semo_18.se1", "seas_18.se1", "sefstars.txt"]
+
+
+def _ephe_presence() -> Dict[str, bool]:
+    return {f: (EPHE_PATH / f).exists() for f in REQUIRED_EPHE_FILES}
+
+
+def _init_swisseph() -> None:
+    """
+    Ensure Swiss Ephemeris uses our local ephemeris directory.
+    Call once at startup (and it's safe to call again).
+    """
+    swe.set_ephe_path(str(EPHE_PATH))
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    _init_swisseph()
+
 
 # -----------------------------
 # CORS
@@ -54,7 +83,10 @@ def sign_from_lon(lon: float) -> Dict[str, Any]:
 
 
 def parse_date_yyyy_mm_dd(s: str) -> dt.date:
-    return dt.datetime.strptime(s, "%Y-%m-%d").date()
+    try:
+        return dt.datetime.strptime(s, "%Y-%m-%d").date()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date format. Expected YYYY-MM-DD")
 
 
 def jd_at_00utc(d: dt.date) -> float:
@@ -70,7 +102,10 @@ def sid_mode_to_swe(mode: SidMode) -> int:
 
 
 def calc_body(jd: float, body_id: int, zodiac: ZodiacMode, sid_mode: SidMode) -> Dict[str, Any]:
-    flags = 0
+    # Always init path (safe) in case environment changes (rare) or startup didn't run
+    _init_swisseph()
+
+    flags = swe.FLG_SWIEPH | swe.FLG_SPEED  # <-- IMPORTANT: speed for retrograde logic
     if zodiac == "sidereal":
         swe.set_sid_mode(sid_mode_to_swe(sid_mode), 0, 0)
         flags |= swe.FLG_SIDEREAL
@@ -100,7 +135,6 @@ def add_south_node(bodies: Dict[str, Any]) -> None:
 
 
 def bodies_to_positions_list(bodies: Dict[str, Any]) -> List[Dict[str, Any]]:
-    # Liste itérable avec la clé "key" (sun, moon, etc.)
     out: List[Dict[str, Any]] = []
     for key, val in bodies.items():
         item = {"key": key}
@@ -109,20 +143,45 @@ def bodies_to_positions_list(bodies: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+# -----------------------------
+# New: META endpoint (proof that ephe files are present on Render)
+# -----------------------------
+@app.get("/api/meta")
+def meta():
+    presence = _ephe_presence()
+    return {
+        "status": "ok",
+        "engine": "swisseph-python",
+        "ephe_path": str(EPHE_PATH),
+        "ephe_present": presence,
+        "ephe_files_ok": all(presence.values()),
+    }
+
+
 @app.get("/api/health")
 def health(
     zodiac: ZodiacMode = Query("tropical"),
     sid_mode: SidMode = Query("lahiri"),
 ):
     try:
+        _init_swisseph()
+        presence = _ephe_presence()
+
         d = dt.date(2026, 1, 1)
         jd = jd_at_00utc(d)
         sun = calc_body(jd, swe.SUN, zodiac, sid_mode)
+
         return {
             "status": "ok",
             "engine": "swisseph-python",
+            # Keep your original fields
             "zodiac": zodiac,
             "siderealMode": sid_mode if zodiac == "sidereal" else None,
+            # Add an alias expected by some frontends
+            "mode": zodiac,
+            # Add ephe proof
+            "ephe_path": str(EPHE_PATH),
+            "ephe_files_ok": all(presence.values()),
             "sample": {"sun": {"longitude": sun["longitude"], "sign": sun["sign"]}},
         }
     except Exception as e:
@@ -151,6 +210,8 @@ def positions(
         "jd": jd,
         "zodiac": zodiac,
         "siderealMode": sid_mode if zodiac == "sidereal" else None,
+        # Alias (harmless, helps some frontends)
+        "mode": zodiac,
         "bodies": bodies,
         "positions": bodies,                 # accès direct positions.sun ✅
         "positionsList": positions_list,     # itérable ✅
@@ -196,6 +257,9 @@ def positions_range(
         "start": d0.isoformat(),
         "end": d1.isoformat(),
         "count": len(days),
+        "zodiac": zodiac,
+        "siderealMode": sid_mode if zodiac == "sidereal" else None,
+        "mode": zodiac,
         "days": days,
     }
 
